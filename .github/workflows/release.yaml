@@ -1,0 +1,95 @@
+# Build and publish ghcr.io/krateo-blueprints/keystone-oidc.
+#
+# Two tags are pushed for every build:
+#
+#   2025.1-ubuntu_jammy            the CONTRACT tag. Blueprints pin this, and it
+#                                  must keep working — it is what the child's
+#                                  Keystone actually pulls.
+#   2025.1-ubuntu_jammy-<version>  an IMMUTABLE tag per release, so a specific
+#                                  build can be pinned or rolled back to.
+#
+# The image tag deliberately does NOT follow the org's bare-semver rule. That
+# rule governs CHART releases; this tag mirrors the upstream OpenStack/LOCI
+# convention because it has to match what the base publishes and what existing
+# blueprints already reference. Git tags here are still bare semver.
+
+name: release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/keystone-oidc
+  CONTRACT_TAG: 2025.1-ubuntu_jammy
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tags
+        run: |
+          set -euo pipefail
+          # Tag builds get the immutable second tag; manual runs only move the
+          # contract tag, so a dispatch cannot silently mint a fake version.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "TAGS=${IMAGE}:${CONTRACT_TAG},${IMAGE}:${CONTRACT_TAG}-${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "TAGS=${IMAGE}:${CONTRACT_TAG}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # The image this replaces was multi-arch; match it, or arm64 nodes
+          # silently fail to schedule Keystone.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.TAGS }}
+          provenance: false
+
+      - name: Verify mod_auth_openidc is actually present
+        run: |
+          set -euo pipefail
+          # The entire reason this image exists is one Apache module. A build that
+          # succeeds without it is worse than a failed build: federation breaks at
+          # runtime, far from the cause.
+          docker run --rm --entrypoint /bin/sh "${IMAGE}:${CONTRACT_TAG}" -c \
+            'test -f /usr/lib/apache2/modules/mod_auth_openidc.so' \
+            && echo "mod_auth_openidc.so present"
+
+      - name: Verify anonymous pullability
+        run: |
+          set -uo pipefail
+          # GHCR packages default to PRIVATE on first publish and do not inherit
+          # visibility. The child's kubelet pulls this anonymously, so a private
+          # package fails at provisioning with an opaque ImagePullBackOff.
+          repo="${GITHUB_REPOSITORY_OWNER,,}/keystone-oidc"
+          tok=$(curl -s "https://ghcr.io/token?scope=repository:${repo}:pull" \
+                | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))')
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${tok}" \
+                 -H 'Accept: application/vnd.oci.image.index.v1+json' \
+                 "https://ghcr.io/v2/${repo}/manifests/${CONTRACT_TAG}")
+          if [ "$code" = "200" ]; then
+            echo "public"
+          else
+            echo "::warning::NOT anonymously pullable (HTTP ${code}) — set the package public"
+          fi
