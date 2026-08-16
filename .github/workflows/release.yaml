@@ -59,9 +59,13 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # The image this replaces was multi-arch; match it, or arm64 nodes
-          # silently fail to schedule Keystone.
-          platforms: linux/amd64,linux/arm64
+          # amd64 only — deliberately, and verified rather than assumed. Both the
+          # Airship base and the braghettos image this replaces publish exactly one
+          # architecture (linux/amd64); their index carries a second entry only
+          # because buildkit attaches an unknown/unknown attestation manifest,
+          # which is easy to misread as multi-arch. Requesting arm64 fails the
+          # build outright: "no match for platform in manifest".
+          platforms: linux/amd64
           push: true
           tags: ${{ env.TAGS }}
           provenance: false
