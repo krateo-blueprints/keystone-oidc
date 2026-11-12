@@ -1,10 +1,16 @@
 # keystone-oidc
 
-OpenStack Keystone **2025.1** with Apache's `mod_auth_openidc`, published as:
+OpenStack Keystone with Apache's `mod_auth_openidc`, one contract tag per OpenStack series:
 
 ```
-ghcr.io/krateo-blueprints/keystone-oidc:2025.1-ubuntu_jammy
+ghcr.io/krateo-blueprints/keystone-oidc:2026.1-ubuntu_noble   # current: Keystone 29.x, mod_auth_openidc 2.4.15
+ghcr.io/krateo-blueprints/keystone-oidc:2025.1-ubuntu_jammy   # previous: Keystone 27.x, mod_auth_openidc 2.4.11, no longer rebuilt
 ```
+
+Use the tag whose series matches the Keystone the rest of the deployment runs. keystone-api
+is the only container that runs this image; db-sync, bootstrap and the other keystone jobs
+run the stock base, and a series mismatch runs keystone-api against a schema another release
+migrated.
 
 Stock Keystone cannot speak OIDC. Federating a child Krateo's Keycloak into
 OpenStack needs `mod_auth_openidc`, which upstream Keystone images do not ship.
@@ -50,19 +56,27 @@ needs it to bind `:80`.
 
 ## Releasing
 
-Push a bare-semver git tag. CI builds `linux/amd64,linux/arm64` and pushes:
+Push a bare-semver git tag. CI builds `linux/amd64` (the only architecture the base
+publishes) and pushes:
 
 | tag | meaning |
 |---|---|
-| `2025.1-ubuntu_jammy` | the contract tag blueprints pin — must keep working |
-| `2025.1-ubuntu_jammy-<version>` | immutable per-release tag for pinning or rollback |
+| `<series>-ubuntu_<distro>`, e.g. `2026.1-ubuntu_noble` | the contract tag blueprints pin |
+| `<series>-ubuntu_<distro>-<version>` | immutable per-release tag for pinning or rollback |
 
-The build fails if `mod_auth_openidc.so` is absent — the one thing this image exists
-for — and warns if the package is not anonymously pullable, since the child's kubelet
-pulls it without credentials.
+The contract tag is derived from the Dockerfile's `FROM` line, not written in the
+workflow, so it always names the series inside the image. The build fails when:
+- `FROM` is not a single digest-pinned `quay.io/airshipit/keystone:<series>-ubuntu_<distro>`;
+- `mod_auth_openidc.so` is absent, the one thing this image exists for;
+- the Keystone major version or the OS codename inside the image disagrees with the tag.
+
+It warns if the package is not anonymously pullable, since the child's kubelet pulls
+it without credentials.
 
 ## Upgrading Keystone
 
-Change the base tag and digest together, then release. The OpenStack release and the
-base OS both appear in the tag, so `2026.1-ubuntu_noble` would be a new contract tag
-and a coordinated change in the consuming blueprints — not a silent move.
+Change the base tag and digest together in `FROM`, then release. The OpenStack release
+and the base OS both appear in the tag, so a new series is a new contract tag and a
+coordinated change in the consuming blueprints, not a silent move. A tag already
+published keeps the image it had. For a series the workflow does not yet know, add its
+Keystone major version to the verification step (openstack/releases lists it).

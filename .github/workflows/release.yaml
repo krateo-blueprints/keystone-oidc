@@ -2,11 +2,18 @@
 #
 # Two tags are pushed for every build:
 #
-#   2025.1-ubuntu_jammy            the CONTRACT tag. Blueprints pin this, and it
-#                                  must keep working — it is what the child's
-#                                  Keystone actually pulls.
-#   2025.1-ubuntu_jammy-<version>  an IMMUTABLE tag per release, so a specific
-#                                  build can be pinned or rolled back to.
+#   <series>-<distro>            the CONTRACT tag, e.g. 2026.1-ubuntu_noble.
+#                                Blueprints pin this; it is what the child's
+#                                Keystone actually pulls.
+#   <series>-<distro>-<version>  an IMMUTABLE tag per release, so a specific
+#                                build can be pinned or rolled back to.
+#
+# The contract tag is DERIVED from the Dockerfile's FROM line, never written here.
+# It used to be a literal, so moving the base to another series would have
+# republished the old tag with a different Keystone inside: a 2025.1 tag carrying
+# 2026.1. Derived, the tag always names the series inside it, and a tag that has
+# already been published keeps the image it had. (2025.1-ubuntu_jammy stays as
+# built from the 2025.1 base.)
 #
 # The image tag deliberately does NOT follow the org's bare-semver rule. That
 # rule governs CHART releases; this tag mirrors the upstream OpenStack/LOCI
@@ -26,7 +33,6 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/keystone-oidc
-  CONTRACT_TAG: 2025.1-ubuntu_jammy
 
 jobs:
   build:
@@ -47,6 +53,13 @@ jobs:
       - name: Resolve tags
         run: |
           set -euo pipefail
+          # The contract tag is the base's own tag. The base must be pinned by
+          # digest as well, or the tag alone would silently change what we ship.
+          from=$(grep -E '^FROM ' Dockerfile)
+          [ "$(grep -cE '^FROM ' Dockerfile)" = 1 ] || { echo "::error::Dockerfile must have exactly one FROM"; exit 1; }
+          CONTRACT_TAG=$(printf '%s\n' "$from" | sed -nE 's#^FROM quay\.io/airshipit/keystone:([0-9]{4}\.[12]-ubuntu_[a-z]+)@sha256:[0-9a-f]{64}$#\1#p')
+          [ -n "$CONTRACT_TAG" ] || { echo "::error::FROM must be quay.io/airshipit/keystone:<series>-ubuntu_<distro>@sha256:<digest>, got: $from"; exit 1; }
+          echo "CONTRACT_TAG=${CONTRACT_TAG}" >> "$GITHUB_ENV"
           # Tag builds get the immutable second tag; manual runs only move the
           # contract tag, so a dispatch cannot silently mint a fake version.
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
@@ -79,6 +92,22 @@ jobs:
           docker run --rm --entrypoint /bin/sh "${IMAGE}:${CONTRACT_TAG}" -c \
             'test -f /usr/lib/apache2/modules/mod_auth_openidc.so' \
             && echo "mod_auth_openidc.so present"
+
+      - name: Verify the image's Keystone and OS are the series its tag names
+        run: |
+          set -euo pipefail
+          # The tag is derived from FROM, but what decides compatibility is what is
+          # inside: the Keystone release and the OS codename. Read both from the
+          # built image and compare them with the tag.
+          series=${CONTRACT_TAG%%-*}; distro=${CONTRACT_TAG#*-ubuntu_}
+          inside=$(docker run --rm --entrypoint /bin/sh "${IMAGE}:${CONTRACT_TAG}" -c \
+            '. /etc/os-release; echo "$VERSION_CODENAME"; keystone-manage --version')
+          codename=$(printf '%s\n' "$inside" | sed -n 1p); ver=$(printf '%s\n' "$inside" | sed -n 2p)
+          # Keystone's major version per series (openstack/releases): 27 = 2025.1, 28 = 2025.2, 29 = 2026.1.
+          case "$series" in 2025.1) want=27 ;; 2025.2) want=28 ;; 2026.1) want=29 ;; *) echo "::error::no Keystone major known for series $series: add it here"; exit 1 ;; esac
+          echo "tag ${CONTRACT_TAG}: inside keystone ${ver}, ${codename}"
+          [ "${ver%%.*}" = "$want" ] || { echo "::error::keystone ${ver} is not ${series} (major ${want})"; exit 1; }
+          [ "$codename" = "$distro" ] || { echo "::error::OS ${codename} is not ${distro}"; exit 1; }
 
       - name: Verify anonymous pullability
         run: |
